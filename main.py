@@ -848,92 +848,82 @@ class GeminiArtist(Star):
     async def openrouter_generate(self, text_prompt: str, images_pil: Optional[List[PILImage.Image]] = None):
         """
         调用OpenAI格式的API生成图片。
-        支持标准 OpenRouter 等使用 chat completions 的服务。
+        支持 OpenRouter、DeepSeek、OpenAI 等兼容 Chat Completions 的服务。
         """
         if not self.api_keys:
             raise ValueError("没有配置API密钥 (api_keys)")
         
         images_pil = images_pil or []
-        max_retries, last_exception = len(self.api_keys), None
-        key_indices_to_try = list(range(len(self.api_keys)))
+        max_retries = len(self.api_keys)
+        last_exception = None
         
+        # 确定密钥尝试顺序
+        key_indices_to_try = list(range(len(self.api_keys)))
         if self.random_api_key_selection:
             random.shuffle(key_indices_to_try)
         else:
+            # 轮询逻辑
             key_indices_to_try = [(self.current_api_key_index + i) % len(self.api_keys) for i in range(len(self.api_keys))]
         
         for attempt_num, key_idx_to_use in enumerate(key_indices_to_try):
             current_key_to_try = self.api_keys[key_idx_to_use]
+            
+            # --- FIX 1: 在 try 块的一开始就初始化 result，防止 return result 报错 ---
+            result = {'text': '', 'image_paths': []}
+            
             try:
                 logger.info(f"openrouter_generate: 尝试API密钥索引 {key_idx_to_use} (尝试 {attempt_num + 1}/{max_retries})")
                 
-                # 创建 OpenAI 客户端
-                # 确保 base_url 格式正确
+                # 处理 Base URL
                 base_url = self.api_base_url_from_config
+                if not base_url.endswith('/v1') and not base_url.endswith('/v1/'):
+                    if base_url.endswith('/'):
+                        base_url = base_url + 'api/v1'
+                    else:
+                        base_url = base_url + '/api/v1'
                 
-                # 检查是否是 OpenRouter（通过 URL 判断）
-                is_openrouter = 'openrouter' in base_url.lower()
+                # 初始化客户端
+                client = OpenAI(
+                    api_key=current_key_to_try,
+                    base_url=base_url
+                )
                 
-                if is_openrouter:
-                    # OpenRouter 使用 chat completions 端点
-                    if not base_url.endswith('/v1') and not base_url.endswith('/v1/'):
-                        if base_url.endswith('/'):
-                            base_url = base_url + 'api/v1'
-                        else:
-                            base_url = base_url + '/api/v1'
-                    
-                    logger.info(f"使用 OpenRouter base_url: {base_url}")
-                    
-                    client = OpenAI(
-                        api_key=current_key_to_try,
-                        base_url=base_url
-                    )
-                    
-                    # OpenRouter 使用 chat.completions 生成图片
-                    logger.info(f"调用 OpenRouter chat completions，模型: {self.model_name_from_config}, 提示词: {text_prompt[:50]}...")
-                    
-                    # 构建消息内容
-                    message_content = []
-                    
-                    # 添加文本提示
-                    message_content.append({
-                        "type": "text",
-                        "text": text_prompt
-                    })
-                    
-                    # 如果有参考图片，添加到消息中（OpenRouter 支持多模态输入）
-                    if images_pil:
-                        logger.info(f"将 {len(images_pil)} 张参考图片加入 OpenRouter 请求上下文")
-                        for idx, img in enumerate(images_pil):
-                            try:
-                                # 将 PIL 图片转换为 base64
-                                buffered = BytesIO()
-                                img.save(buffered, format="PNG")
-                                img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
-                                
-                                # 添加图片到消息
-                                message_content.append({
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/png;base64,{img_base64}"
-                                    }
-                                })
-                                logger.debug(f"成功添加第 {idx + 1} 张参考图片到请求")
-                            except Exception as e:
-                                logger.error(f"处理参考图片 {idx + 1} 失败: {e}")
-                    
-                    result = {'text': '', 'image_paths': []}
-                    
-                    # 重试机制：能需要多次尝试才能生成图片
-                    max_generation_retries = 5
-                    retry_delay = 3  # 秒
-                    
-                    for generation_attempt in range(max_generation_retries):
-                        if generation_attempt > 0:
-                            logger.info(f"第 {generation_attempt + 1} 次尝试生成图片...")
-                            await asyncio.sleep(retry_delay)
-                        
-                        # 发送请求
+                # 构建消息内容 (Multimodal / Text)
+                message_content = []
+                
+                # 1. 添加文本提示
+                message_content.append({
+                    "type": "text",
+                    "text": text_prompt
+                })
+                
+                # 2. 添加参考图 (如果存在)
+                if images_pil:
+                    logger.info(f"将 {len(images_pil)} 张参考图片加入请求上下文")
+                    for idx, img in enumerate(images_pil):
+                        try:
+                            buffered = BytesIO()
+                            # 统一转为 PNG 防止格式兼容问题
+                            img.save(buffered, format="PNG")
+                            img_base64 = base64.b64encode(buffered.getvalue()).decode('utf-8')
+                            
+                            message_content.append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{img_base64}"
+                                }
+                            })
+                        except Exception as e:
+                            logger.error(f"处理参考图片 {idx + 1} 失败: {e}")
+
+                logger.info(f"调用 Chat Completions，模型: {self.model_name_from_config}")
+
+                # --- FIX 2: 移除 if is_openrouter 限制，通用化处理 ---
+                # 重试机制 (针对生成过程)
+                max_generation_retries = 3
+                
+                for generation_attempt in range(max_generation_retries):
+                    try:
                         response = await asyncio.to_thread(
                             client.chat.completions.create,
                             model=self.model_name_from_config,
@@ -944,91 +934,107 @@ class GeminiArtist(Star):
                                 }
                             ]
                         )
+                    except Exception as e_gen:
+                        logger.warning(f"生成请求失败 (尝试 {generation_attempt+1}): {e_gen}")
+                        if generation_attempt == max_generation_retries - 1:
+                            raise e_gen
+                        await asyncio.sleep(2)
+                        continue
+
+                    # 解析响应
+                    if response.choices and len(response.choices) > 0:
+                        choice = response.choices[0]
+                        message = choice.message
                         
-                        # 处理 OpenRouter 的响应
-                        if response.choices and len(response.choices) > 0:
-                            choice = response.choices[0]
-                            message = choice.message
+                        raw_content = ""
+                        if hasattr(message, 'content') and message.content:
+                            raw_content = message.content
+                            # 暂存文本，稍后可能还要清洗掉里面的 URL
+                            result['text'] = raw_content
+
+                        # --- 图片提取逻辑 ---
+                        found_image_urls = []
+
+                        # 方式 A: OpenRouter 专有字段 message.images
+                        if hasattr(message, 'images') and message.images:
+                            logger.info("检测到 OpenRouter 'images' 字段")
+                            for img_item in message.images:
+                                if isinstance(img_item, dict) and 'url' in img_item:
+                                    found_image_urls.append(img_item['url'])
+                                elif isinstance(img_item, str): # 某些情况直接是 URL 列表
+                                    found_image_urls.append(img_item)
+
+                        # 方式 B: 从文本内容的 Markdown 或 URL 中提取 (适用于 Nano Banana, Flux 等)
+                        # 很多模型直接返回 "Here is your image: ![img](https://...)"
+                        if raw_content:
+                            # 提取 Markdown 图片: ![...](url)
+                            markdown_urls = re.findall(r'!\[.*?\]\((https?://.*?)\)', raw_content)
+                            found_image_urls.extend(markdown_urls)
                             
-                            # 打印调试信息
-                            # logger.debug(f"OpenRouter message 对象: {message}")
+                            # 提取纯 URL (以 http 开头，图片格式结尾) - 作为一个兜底
+                            # 简单的正则，避免匹配到括号内的
+                            plain_urls = re.findall(r'(https?://[^\s\)]+(?:\.png|\.jpg|\.jpeg|\.webp))', raw_content)
+                            for p_url in plain_urls:
+                                if p_url not in found_image_urls:
+                                    found_image_urls.append(p_url)
+
+                        # --- 下载并保存图片 ---
+                        if found_image_urls:
+                            logger.info(f"提取到 {len(found_image_urls)} 个图片URL，准备下载...")
+                            os.makedirs(self.temp_dir, exist_ok=True)
                             
-                            # 处理文本内容
-                            text_content = ""
-                            if hasattr(message, 'content') and message.content:
-                                text_content = message.content
-                                logger.debug(f"找到文本内容: {text_content[:100]}...")
-                            
-                            # 处理图片 - OpenRouter 在 message.images 字段返回图片
-                            if hasattr(message, 'images') and message.images:
-                                logger.info(f"找到 {len(message.images)} 张图片在 message.images 字段")
-                                
-                                for img_item in message.images:
-                                    if isinstance(img_item, dict):
-                                        # 获取图片数据
-                                        image_data = None
+                            for url in found_image_urls:
+                                try:
+                                    # 使用 download_pil_image_from_url 复用下载逻辑
+                                    # 注意：这里我们是为了拿到本地路径，所以有点绕，
+                                    # 但为了稳定性，先下成 PIL 再存是比较稳妥的验证方式，
+                                    # 或者直接用 download_file
+                                    
+                                    # 方法：直接下载为文件
+                                    ext = "png"
+                                    if ".jpg" in url or ".jpeg" in url: ext = "jpg"
+                                    elif ".webp" in url: ext = "webp"
+                                    
+                                    filename = f"api_gen_{time.time()}_{random.randint(100,999)}.{ext}"
+                                    save_path = os.path.join(self.temp_dir, filename)
+                                    
+                                    await download_file(url=url, path=save_path)
+                                    
+                                    if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
+                                        result['image_paths'].append(save_path)
+                                        logger.info(f"图片下载成功: {save_path}")
+                                    else:
+                                        logger.warning(f"下载文件为空或失败: {url}")
                                         
-                                        # 检查不同的可能格式
-                                        if img_item.get('type') == 'image_url' and 'image_url' in img_item:
-                                            image_url_obj = img_item['image_url']
-                                            if isinstance(image_url_obj, dict) and 'url' in image_url_obj:
-                                                image_data = image_url_obj['url']
-                                        elif 'url' in img_item:
-                                            image_data = img_item['url']
-                                        elif 'data' in img_item:
-                                            image_data = img_item['data']
-                                        
-                                        if image_data:
-                                            # 处理 data URL (base64)
-                                            if image_data.startswith('data:image'):
-                                                try:
-                                                    # 提取 base64 数据
-                                                    header, encoded = image_data.split(',', 1)
-                                                    img_bytes = base64.b64decode(encoded)
-                                                    img_pil = PILImage.open(BytesIO(img_bytes))
-                                                    
-                                                    # 保存图片
-                                                    os.makedirs(self.temp_dir, exist_ok=True)
-                                                    temp_fp = os.path.join(
-                                                        self.temp_dir,
-                                                        f"openrouter_gen_{time.time()}_{random.randint(100,999)}.png"
-                                                    )
-                                                    img_pil.save(temp_fp)
-                                                    result['image_paths'].append(temp_fp)
-                                                    logger.info(f"OpenRouter 生成并保存图片(base64): {temp_fp}")
-                                                except Exception as e:
-                                                    logger.error(f"处理 base64 图片失败: {e}")
-                                
-                                # 检查是否成功生成了图片，如果有则跳出重试循环
-                                if result['image_paths']:
-                                    logger.info(f"成功生成 {len(result['image_paths'])} 张图片，停止重试")
-                                    break
-                        
-                        # 如果有图片生成成功，也要跳出外层的重试循环
-                        if result['image_paths']:
-                            break
+                                except Exception as e_dl:
+                                    logger.error(f"下载生成的图片失败 {url}: {e_dl}")
+                            
+                            # 如果成功获取了图片，且文本中全是 URL，可以考虑清空文本避免重复刷屏
+                            # 这里简单处理：保留文本，因为 LLM 可能有其他描述
+                            break # 跳出生成重试循环
                     
-                    # 结束所有重试后，检查结果
-                    if not result['image_paths']:
-                        logger.warning(f"经过 {max_generation_retries} 次尝试后仍未生成图片")
-                    
-                if not self.random_api_key_selection:
-                    self.current_api_key_index = (key_idx_to_use + 1) % len(self.api_keys)
-                return result
+                    logger.warning("本次 API 调用未返回有效图片，准备重试...")
+                
+                # 如果成功拿到数据（文本或图片），就认为是成功了
+                if result['image_paths'] or result['text']:
+                    if not self.random_api_key_selection:
+                        self.current_api_key_index = (key_idx_to_use + 1) % len(self.api_keys)
+                    return result
                     
             except Exception as e:
-                logger.error(f"openrouter_generate: API处理失败 (密钥 {key_idx_to_use}): {str(e)}", exc_info=True)
+                logger.error(f"openrouter_generate: API处理失败 (密钥索引 {key_idx_to_use}): {str(e)}", exc_info=True)
                 last_exception = e
                 
             if attempt_num < max_retries - 1:
-                logger.info(f"openrouter_generate: 尝试下个API密钥 (下个索引: {key_indices_to_try[attempt_num+1]})")
+                logger.info(f"切换下一个API密钥...")
             else:
-                logger.error("openrouter_generate: 所有API密钥均尝试失败。")
+                logger.error("所有API密钥尝试完毕，均失败。")
         
         if last_exception:
             raise last_exception
-        logger.error("openrouter_generate: 未能从API获取数据且无明确异常。")
-        raise ValueError("OpenAI API处理失败，无可用密钥或未记录错误。")
+        
+        # 如果代码走到这里 result 也是存在的（即便是空的）
+        return result
 
     async def gemini_generate(self, text_prompt: str, images_pil: Optional[List[PILImage.Image]] = None):
         """
