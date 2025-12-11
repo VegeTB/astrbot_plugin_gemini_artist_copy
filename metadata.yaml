@@ -1,6 +1,6 @@
-name: astrbot_plugin_gemini_artist
+name: astrbot_plugin_gemini_artist_copy
 desc: 提供调用Gemini系列及OpenRouter格式API的生图模型的函数工具
 help: 一个调用Gemini系列及OpenRouter格式API的生图模型的函数工具,同时提供了指令调用的方式
 version: v1.5.0
 author: nichinichisou
-repo: https://github.com/nichinichisou0609/astrbot_plugin_gemini_artist
+repo: https://github.com/VegeTB/astrbot_plugin_gemini_artist_copy
