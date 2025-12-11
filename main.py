@@ -23,7 +23,7 @@ import re
 
 
 
-@register("gemini_artist_plugin", "nichinichisou", "基于 Google Gemini 和 OpenRouter 格式 API 的AI绘画插件", "1.5.0")
+@register("gemini_artist_plugin_copy", "nichinichisou", "基于 Google Gemini 和 OpenRouter 格式 API 的AI绘画插件", "1.5.0")
 class GeminiArtist(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
